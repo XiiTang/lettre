@@ -109,6 +109,7 @@ enum CodecStatus {
 }
 
 /// CRLF, line, transfer-mode and total-byte validation shared by DATA and BDAT.
+#[derive(Clone, Copy, Debug)]
 pub struct BodyValidator {
     maximum: usize,
     total: usize,
