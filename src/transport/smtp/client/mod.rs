@@ -108,10 +108,8 @@ enum CodecStatus {
     StartOfNewLine,
 }
 
-/// Incremental DATA transparency and syntax state, shared by buffered and
-/// streaming senders. No message body is retained between chunks.
-pub struct DataEncoder {
-    codec: ClientCodec,
+/// CRLF, line, transfer-mode and total-byte validation shared by DATA and BDAT.
+pub struct BodyValidator {
     maximum: usize,
     total: usize,
     line: usize,
@@ -119,11 +117,10 @@ pub struct DataEncoder {
     allow_eight_bit: bool,
     failed: bool,
 }
-impl DataEncoder {
-    /// Create a bounded DATA encoder for the negotiated envelope mode.
+impl BodyValidator {
+    /// Create a bounded text validator for the negotiated envelope mode.
     pub fn new(maximum: usize, allow_eight_bit: bool) -> Self {
         Self {
-            codec: ClientCodec::new(),
             maximum,
             total: 0,
             line: 0,
@@ -132,8 +129,8 @@ impl DataEncoder {
             failed: false,
         }
     }
-    /// Validate and encode a chunk. An error permanently invalidates this encoder.
-    pub fn encode(&mut self, bytes: &[u8]) -> Result<Vec<u8>, crate::transport::smtp::Error> {
+    /// Validate one text chunk without retaining or transforming it.
+    pub fn validate(&mut self, bytes: &[u8]) -> Result<(), crate::transport::smtp::Error> {
         use crate::transport::smtp::error;
         if self.failed {
             return Err(error::client("SMTP DATA encoder is retired"));
@@ -163,28 +160,55 @@ impl DataEncoder {
             }
             self.previous = Some(byte);
         }
-        let capacity = bytes
-            .len()
-            .checked_mul(2)
-            .ok_or_else(|| error::client("SMTP DATA chunk is too large"))?;
-        let mut out = Vec::with_capacity(capacity);
-        self.codec.encode(bytes, &mut out);
         self.failed = false;
-        Ok(out)
+        Ok(())
     }
-    /// Validate termination and return the terminator without normalizing input.
-    pub fn finish(mut self) -> Result<&'static [u8], crate::transport::smtp::Error> {
+    /// Validate the end of a text message without normalizing it.
+    pub fn finish(mut self) -> Result<(), crate::transport::smtp::Error> {
         self.failed |= self.total != 0 && self.previous != Some(b'\n');
         if self.failed {
             return Err(crate::transport::smtp::error::client(
                 "Incomplete SMTP DATA",
             ));
         }
-        Ok(b".\r\n")
+        Ok(())
     }
     /// Number of unencoded body bytes consumed.
     pub fn bytes(&self) -> usize {
         self.total
+    }
+}
+
+/// Incremental DATA transparency using the existing SMTP codec.
+pub struct DataEncoder {
+    codec: ClientCodec,
+    validator: BodyValidator,
+}
+impl DataEncoder {
+    /// Create a bounded DATA encoder for the negotiated envelope mode.
+    pub fn new(maximum: usize, allow_eight_bit: bool) -> Self {
+        Self {
+            codec: ClientCodec::new(),
+            validator: BodyValidator::new(maximum, allow_eight_bit),
+        }
+    }
+    /// Validate and encode one chunk; no body is retained.
+    pub fn encode(&mut self, bytes: &[u8]) -> Result<Vec<u8>, crate::transport::smtp::Error> {
+        self.validator.validate(bytes)?;
+        let mut output = Vec::with_capacity(bytes.len().checked_mul(2).ok_or_else(|| {
+            crate::transport::smtp::error::client("SMTP DATA chunk is too large")
+        })?);
+        self.codec.encode(bytes, &mut output);
+        Ok(output)
+    }
+    /// Finish the message and return its exact protocol terminator.
+    pub fn finish(self) -> Result<&'static [u8], crate::transport::smtp::Error> {
+        self.validator.finish()?;
+        Ok(b".\r\n")
+    }
+    /// Count unencoded body bytes.
+    pub fn bytes(&self) -> usize {
+        self.validator.bytes()
     }
 }
 

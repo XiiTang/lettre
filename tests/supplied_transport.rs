@@ -83,3 +83,15 @@ async fn final_reply_may_omit_text() {
         250
     );
 }
+
+#[test]
+fn chunked_text_validation_has_no_dot_transparency_or_chunk_boundary_assumptions() {
+    use lettre::transport::smtp::client::BodyValidator;
+    let mut body = BodyValidator::new(100, false);
+    body.validate(b"a\r").unwrap();
+    body.validate(b"\n.dot\r\n").unwrap();
+    body.finish().unwrap();
+    let mut body = BodyValidator::new(100, true);
+    body.validate(b"unfinished").unwrap();
+    assert!(body.finish().is_err());
+}

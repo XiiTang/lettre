@@ -9,4 +9,6 @@ Base: lettre v0.11.23, eb6136a06f1aba9432f73ef8f02a06aa0afc8f9c.
 - Authentication/body writes are never included in tracing. Transient reply buffers are zeroed. Ordinary upstream high-level clients retain their existing success/error API.
 - Accept a final reply code without optional text. Gate upstream TLS-only tests on their required features.
 
-Validation: 32 library tests and 4 supplied-transport integration tests pass with `--no-default-features --features smtp-transport,tokio1`; IMAPipe SMTP tests cover partial recipient rejection, explicit STARTTLS, frozen authentication failure, DATA streaming, BDAT and ordered pipeline results.
+Validation: 32 library tests and 5 supplied-transport integration tests pass with `--no-default-features --features smtp-transport,tokio1`; IMAPipe SMTP tests cover partial recipient rejection, explicit STARTTLS, frozen authentication failure, DATA streaming, BDAT and ordered pipeline results.
+
+Follow-up: DATA and text BDAT share one incremental body validator; BDAT validation never adds dot transparency or assumes chunk boundaries are line boundaries.
