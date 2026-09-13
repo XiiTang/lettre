@@ -95,6 +95,15 @@ enum InnerAsyncNetworkStream {
 
 #[allow(deprecated)]
 impl AsyncNetworkStream {
+    /// Extract a caller-supplied stream; TLS established externally is opaque.
+    #[cfg(feature = "tokio1")]
+    pub fn into_existing_tokio1(self) -> Result<Box<dyn AsyncTokioStream>, Error> {
+        match self.inner {
+            InnerAsyncNetworkStream::Tokio1Tcp(stream) => Ok(stream),
+            _ => Err(error::client("Transport was not supplied by caller")),
+        }
+    }
+
     fn new(inner: InnerAsyncNetworkStream) -> Self {
         if let InnerAsyncNetworkStream::None = inner {
             debug_assert!(false, "InnerAsyncNetworkStream::None must never be built");

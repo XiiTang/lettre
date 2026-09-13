@@ -11,7 +11,7 @@ use nom::{
     IResult, Parser,
     branch::alt,
     bytes::streaming::{tag, take_until},
-    combinator::{complete, map},
+    combinator::{complete, map, value},
     multi::many0,
     sequence::preceded,
 };
@@ -161,6 +161,11 @@ impl FromStr for Response {
 }
 
 impl Response {
+    /// Consume a reply without copying its potentially private text.
+    pub fn into_parts(self) -> (Code, Vec<String>) {
+        (self.code, self.message)
+    }
+
     /// Creates a new `Response`
     pub fn new(code: Code, message: Vec<String>) -> Response {
         Response { code, message }
@@ -305,8 +310,14 @@ pub(crate) fn parse_response(i: &str) -> IResult<&str, Response> {
         tag("\r\n"),
     ))
     .parse(i)?;
-    let (i, (last_code, last_line)) =
-        (parse_code, preceded(tag(" "), take_until("\r\n"))).parse(i)?;
+    let (i, (last_code, last_line)) = (
+        parse_code,
+        alt((
+            preceded(tag(" "), take_until("\r\n")),
+            value("", nom::combinator::peek(tag("\r\n"))),
+        )),
+    )
+        .parse(i)?;
     let (i, _) = complete(tag("\r\n")).parse(i)?;
 
     // Check that all codes are equal.
