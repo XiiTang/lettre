@@ -12,3 +12,7 @@ Base: lettre v0.11.23, eb6136a06f1aba9432f73ef8f02a06aa0afc8f9c.
 Validation: 32 library tests and 5 supplied-transport integration tests pass with `--no-default-features --features smtp-transport,tokio1`; IMAPipe SMTP tests cover partial recipient rejection, explicit STARTTLS, frozen authentication failure, DATA streaming, BDAT and ordered pipeline results.
 
 Follow-up: DATA and text BDAT share one incremental body validator; BDAT validation never adds dot transparency or assumes chunk boundaries are line boundaries.
+
+## Optional stream ceiling (2026-09-14)
+
+`BodyValidator::new` and `DataEncoder::new` accept `Option<usize>`: `None` imposes no cumulative product byte ceiling. Checked counters, line limits, CRLF/NUL/transfer-mode validation and terminal failures are unchanged. The complete-body helper passes its actual body bound. Validation: library and supplied_transport tests, including optional and explicit stream bounds.

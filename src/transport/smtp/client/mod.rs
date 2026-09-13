@@ -111,7 +111,7 @@ enum CodecStatus {
 /// CRLF, line, transfer-mode and total-byte validation shared by DATA and BDAT.
 #[derive(Clone, Copy, Debug)]
 pub struct BodyValidator {
-    maximum: usize,
+    maximum: Option<usize>,
     total: usize,
     line: usize,
     previous: Option<u8>,
@@ -119,8 +119,8 @@ pub struct BodyValidator {
     failed: bool,
 }
 impl BodyValidator {
-    /// Create a bounded text validator for the negotiated envelope mode.
-    pub fn new(maximum: usize, allow_eight_bit: bool) -> Self {
+    /// Create a text validator with an optional cumulative byte bound for the negotiated envelope mode.
+    pub fn new(maximum: Option<usize>, allow_eight_bit: bool) -> Self {
         Self {
             maximum,
             total: 0,
@@ -140,7 +140,7 @@ impl BodyValidator {
         self.total = self
             .total
             .checked_add(bytes.len())
-            .filter(|n| *n <= self.maximum)
+            .filter(|n| self.maximum.is_none_or(|maximum| *n <= maximum))
             .ok_or_else(|| error::client("SMTP DATA exceeds its byte limit"))?;
         for &byte in bytes {
             if byte == 0
@@ -186,8 +186,8 @@ pub struct DataEncoder {
     validator: BodyValidator,
 }
 impl DataEncoder {
-    /// Create a bounded DATA encoder for the negotiated envelope mode.
-    pub fn new(maximum: usize, allow_eight_bit: bool) -> Self {
+    /// Create a DATA encoder with an optional cumulative byte bound for the negotiated envelope mode.
+    pub fn new(maximum: Option<usize>, allow_eight_bit: bool) -> Self {
         Self {
             codec: ClientCodec::new(),
             validator: BodyValidator::new(maximum, allow_eight_bit),

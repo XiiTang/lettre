@@ -85,7 +85,7 @@ impl AsyncSmtpConnection {
         mut source: R,
         maximum: usize,
     ) -> Result<(), Error> {
-        let mut encoder = super::DataEncoder::new(maximum, true);
+        let mut encoder = super::DataEncoder::new(Some(maximum), true);
         let mut input = [0u8; 8192];
         loop {
             let count = source.read(&mut input).await.map_err(error::network)?;

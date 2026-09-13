@@ -54,19 +54,19 @@ async fn malformed_and_oversized_replies_fail_without_echoing_input() {
 }
 #[test]
 fn streaming_encoder_handles_crlf_split_and_terminal_errors() {
-    let mut encoder = DataEncoder::new(100, false);
+    let mut encoder = DataEncoder::new(Some(100), false);
     let mut out = encoder.encode(b".a\r").unwrap();
     out.extend(encoder.encode(b"\n.").unwrap());
     out.extend(encoder.encode(b"b\r\n").unwrap());
     out.extend(encoder.finish().unwrap());
     assert_eq!(out, b"..a\r\n..b\r\n.\r\n");
-    let mut encoder = DataEncoder::new(3, false);
+    let mut encoder = DataEncoder::new(Some(3), false);
     assert!(encoder.encode(b"1234").is_err());
     assert!(encoder.encode(b"\r\n").is_err());
     assert!(encoder.finish().is_err());
-    let mut encoder = DataEncoder::new(100, false);
+    let mut encoder = DataEncoder::new(Some(100), false);
     assert!(encoder.encode(b"bad\n").is_err());
-    let mut encoder = DataEncoder::new(100, false);
+    let mut encoder = DataEncoder::new(Some(100), false);
     assert!(encoder.encode(&[0xff]).is_err());
 }
 #[tokio::test]
@@ -87,11 +87,27 @@ async fn final_reply_may_omit_text() {
 #[test]
 fn chunked_text_validation_has_no_dot_transparency_or_chunk_boundary_assumptions() {
     use lettre::transport::smtp::client::BodyValidator;
-    let mut body = BodyValidator::new(100, false);
+    let mut body = BodyValidator::new(Some(100), false);
     body.validate(b"a\r").unwrap();
     body.validate(b"\n.dot\r\n").unwrap();
     body.finish().unwrap();
-    let mut body = BodyValidator::new(100, true);
+    let mut body = BodyValidator::new(Some(100), true);
     body.validate(b"unfinished").unwrap();
     assert!(body.finish().is_err());
+}
+
+#[test]
+fn optional_stream_bound_preserves_validation_and_overflow_protection() {
+    let mut encoder = DataEncoder::new(None, false);
+    for _ in 0..10000 {
+        encoder.encode(b"body\r\n").unwrap();
+    }
+    assert_eq!(encoder.bytes(), 60000);
+    assert_eq!(encoder.finish().unwrap(), b".\r\n");
+    assert!(
+        DataEncoder::new(Some(5), false)
+            .encode(b"body\r\n")
+            .is_err()
+    );
+    assert!(DataEncoder::new(None, false).encode(b"body\n").is_err());
 }
