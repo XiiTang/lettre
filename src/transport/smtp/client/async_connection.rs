@@ -1,11 +1,9 @@
 use std::{fmt::Display, net::IpAddr, time::Duration};
 
-use futures_util::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use futures_util::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
 #[cfg(feature = "tokio1")]
 use super::async_net::AsyncTokioStream;
-#[cfg(feature = "tracing")]
-use super::escape_crlf;
 #[allow(deprecated)]
 use super::{
     ClientCodec, MAX_RESPONSE_BYTES, MAX_RESPONSE_LINE_BYTES, TlsParameters,
@@ -48,6 +46,92 @@ pub struct AsyncSmtpConnection {
 }
 
 impl AsyncSmtpConnection {
+    /// Adopt a transport without greeting, EHLO, authentication or implicit close.
+    /// The owner explicitly drives negotiation and may use its own TLS provider.
+    #[cfg(feature = "tokio1")]
+    pub fn from_transport(stream: Box<dyn AsyncTokioStream>) -> Self {
+        #[allow(deprecated)]
+        let stream = AsyncNetworkStream::use_existing_tokio1(stream);
+        Self {
+            stream: BufReader::with_capacity(1, stream),
+            panic: false,
+            server_info: ServerInfo::default(),
+        }
+    }
+
+    /// Return a caller-supplied transport after a completed STARTTLS response.
+    /// Buffered plaintext cannot be discarded at a security boundary.
+    #[cfg(feature = "tokio1")]
+    pub fn into_transport(self) -> Result<Box<dyn AsyncTokioStream>, Error> {
+        if !self.stream.buffer().is_empty() {
+            return Err(error::response("Unread plaintext at transport handoff"));
+        }
+        self.stream.into_inner().into_existing_tokio1()
+    }
+
+    /// Write an already validated command/chunk without reading a reply.
+    /// This supports explicit pipelining, BDAT and private SASL exchanges.
+    /// No command, payload or credential bytes are logged.
+    pub async fn write_bytes(&mut self, bytes: &[u8]) -> Result<(), Error> {
+        self.write(bytes).await
+    }
+
+    /// Send DATA content from an asynchronous source with a strict byte bound.
+    /// Preserves CRLF input and uses the same transparency codec as `message`.
+    /// Invalid or interrupted input retires the caller's connection; no RSET,
+    /// QUIT, normalization or resubmission is performed here.
+    pub async fn write_data<R: futures_io::AsyncRead + Unpin>(
+        &mut self,
+        mut source: R,
+        maximum: usize,
+    ) -> Result<(), Error> {
+        let mut encoder = super::DataEncoder::new(maximum, true);
+        let mut input = [0u8; 8192];
+        loop {
+            let count = source.read(&mut input).await.map_err(error::network)?;
+            if count == 0 {
+                break;
+            }
+            self.write(&encoder.encode(&input[..count])?).await?;
+        }
+        self.write(encoder.finish()?).await
+    }
+
+    /// Read one bounded reply without converting remote rejection into an error.
+    /// Returns the exact reply bytes alongside the library's parsed response.
+    /// The caller must keep authentication responses on its private path.
+    pub async fn read_response_fact(&mut self) -> Result<(Response, Vec<u8>), Error> {
+        let mut buffer = zeroize::Zeroizing::new(Vec::with_capacity(512));
+        loop {
+            let start = buffer.len();
+            let limit = MAX_RESPONSE_LINE_BYTES.min(MAX_RESPONSE_BYTES.saturating_sub(start));
+            if limit == 0 {
+                return Err(error::response("SMTP response exceeds its limit"));
+            }
+            let count = (&mut self.stream)
+                .take((limit + 1) as u64)
+                .read_until(b'\n', &mut buffer)
+                .await
+                .map_err(error::network)?;
+            if count == 0 {
+                return Err(error::response("Incomplete SMTP response"));
+            }
+            if count > limit || !buffer[start..].ends_with(b"\r\n") {
+                return Err(error::response(
+                    "SMTP response exceeds limits or lacks CRLF",
+                ));
+            }
+            let text = std::str::from_utf8(&buffer)
+                .map_err(|_| error::response("SMTP response is not UTF-8"))?;
+            match parse_response(text) {
+                Ok((remaining, response)) if remaining.is_empty() => {
+                    return Ok((response, std::mem::take(&mut *buffer)));
+                }
+                Err(nom::Err::Incomplete(_)) => {}
+                _ => return Err(error::response("Invalid SMTP response")),
+            }
+        }
+    }
     /// Get information about the server
     pub fn server_info(&self) -> &ServerInfo {
         &self.server_info
@@ -352,51 +436,18 @@ impl AsyncSmtpConnection {
             .map_err(error::network)?;
 
         #[cfg(feature = "tracing")]
-        tracing::debug!("Wrote: {}", escape_crlf(&String::from_utf8_lossy(string)));
+        tracing::debug!(bytes = string.len(), "SMTP write completed");
         Ok(())
     }
 
     /// Gets the SMTP response
     pub async fn read_response(&mut self) -> Result<Response, Error> {
-        let mut buffer = String::with_capacity(100);
-        let mut pre = 0;
-
-        while self
-            .stream
-            .read_line(&mut buffer)
-            .await
-            .map_err(error::network)?
-            > 0
-        {
-            if buffer.len() - pre > MAX_RESPONSE_LINE_BYTES {
-                return Err(error::response("SMTP response line too long"));
-            }
-            if buffer.len() > MAX_RESPONSE_BYTES {
-                return Err(error::response("SMTP response too large"));
-            }
-            pre = buffer.len();
-
-            #[cfg(feature = "tracing")]
-            tracing::debug!("<< {}", escape_crlf(&buffer));
-            match parse_response(&buffer) {
-                Ok((_remaining, response)) => {
-                    return if response.is_positive() {
-                        Ok(response)
-                    } else {
-                        Err(error::code_from_response(&response))
-                    };
-                }
-                Err(nom::Err::Failure(e)) => {
-                    return Err(error::response(e.to_string()));
-                }
-                Err(nom::Err::Incomplete(_)) => { /* read more */ }
-                Err(nom::Err::Error(e)) => {
-                    return Err(error::response(e.to_string()));
-                }
-            }
+        let (response, _) = self.read_response_fact().await?;
+        if response.is_positive() {
+            Ok(response)
+        } else {
+            Err(error::code_from_response(&response))
         }
-
-        Err(error::response("incomplete response"))
     }
 
     /// The X509 certificate of the server (DER encoded)

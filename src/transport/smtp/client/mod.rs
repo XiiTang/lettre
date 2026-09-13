@@ -108,6 +108,86 @@ enum CodecStatus {
     StartOfNewLine,
 }
 
+/// Incremental DATA transparency and syntax state, shared by buffered and
+/// streaming senders. No message body is retained between chunks.
+pub struct DataEncoder {
+    codec: ClientCodec,
+    maximum: usize,
+    total: usize,
+    line: usize,
+    previous: Option<u8>,
+    allow_eight_bit: bool,
+    failed: bool,
+}
+impl DataEncoder {
+    /// Create a bounded DATA encoder for the negotiated envelope mode.
+    pub fn new(maximum: usize, allow_eight_bit: bool) -> Self {
+        Self {
+            codec: ClientCodec::new(),
+            maximum,
+            total: 0,
+            line: 0,
+            previous: None,
+            allow_eight_bit,
+            failed: false,
+        }
+    }
+    /// Validate and encode a chunk. An error permanently invalidates this encoder.
+    pub fn encode(&mut self, bytes: &[u8]) -> Result<Vec<u8>, crate::transport::smtp::Error> {
+        use crate::transport::smtp::error;
+        if self.failed {
+            return Err(error::client("SMTP DATA encoder is retired"));
+        }
+        self.failed = true;
+        self.total = self
+            .total
+            .checked_add(bytes.len())
+            .filter(|n| *n <= self.maximum)
+            .ok_or_else(|| error::client("SMTP DATA exceeds its byte limit"))?;
+        for &byte in bytes {
+            if byte == 0
+                || !self.allow_eight_bit && !byte.is_ascii()
+                || byte == b'\n' && self.previous != Some(b'\r')
+                || self.previous == Some(b'\r') && byte != b'\n'
+            {
+                return Err(error::client(
+                    "SMTP DATA violates the envelope or CRLF framing",
+                ));
+            }
+            self.line += 1;
+            if self.line > 1000 {
+                return Err(error::client("SMTP DATA line exceeds 1000 bytes"));
+            }
+            if byte == b'\n' {
+                self.line = 0;
+            }
+            self.previous = Some(byte);
+        }
+        let capacity = bytes
+            .len()
+            .checked_mul(2)
+            .ok_or_else(|| error::client("SMTP DATA chunk is too large"))?;
+        let mut out = Vec::with_capacity(capacity);
+        self.codec.encode(bytes, &mut out);
+        self.failed = false;
+        Ok(out)
+    }
+    /// Validate termination and return the terminator without normalizing input.
+    pub fn finish(mut self) -> Result<&'static [u8], crate::transport::smtp::Error> {
+        self.failed |= self.total != 0 && self.previous != Some(b'\n');
+        if self.failed {
+            return Err(crate::transport::smtp::error::client(
+                "Incomplete SMTP DATA",
+            ));
+        }
+        Ok(b".\r\n")
+    }
+    /// Number of unencoded body bytes consumed.
+    pub fn bytes(&self) -> usize {
+        self.total
+    }
+}
+
 /// Returns the string replacing all the CRLF with "\<CRLF\>"
 /// Used for debug displays
 #[cfg(feature = "tracing")]

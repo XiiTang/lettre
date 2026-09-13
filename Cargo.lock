@@ -1212,6 +1212,7 @@ dependencies = [
  "walkdir",
  "web-time",
  "webpki-roots",
+ "zeroize",
 ]
 
 [[package]]
