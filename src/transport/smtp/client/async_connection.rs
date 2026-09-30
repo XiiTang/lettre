@@ -101,6 +101,11 @@ impl AsyncSmtpConnection {
     /// Returns the exact reply bytes alongside the library's parsed response.
     /// The caller must keep authentication responses on its private path.
     pub async fn read_response_fact(&mut self) -> Result<(Response, Vec<u8>), Error> {
+        Self::read_reply(&mut self.stream).await
+    }
+    async fn read_reply<R: futures_io::AsyncBufRead + Unpin>(
+        reader: &mut R,
+    ) -> Result<(Response, Vec<u8>), Error> {
         let mut buffer = zeroize::Zeroizing::new(Vec::with_capacity(512));
         loop {
             let start = buffer.len();
@@ -108,7 +113,7 @@ impl AsyncSmtpConnection {
             if limit == 0 {
                 return Err(error::response("SMTP response exceeds its limit"));
             }
-            let count = (&mut self.stream)
+            let count = (&mut *reader)
                 .take((limit + 1) as u64)
                 .read_until(b'\n', &mut buffer)
                 .await
@@ -129,6 +134,55 @@ impl AsyncSmtpConnection {
                 }
                 Err(nom::Err::Incomplete(_)) => {}
                 _ => return Err(error::response("Invalid SMTP response")),
+            }
+        }
+    }
+
+    /// Drive pipeline writing and ordered reply parsing together. The callback
+    /// sees each validated reply immediately, including replies before an I/O
+    /// error. Returning false stops the writer (for example after SMTP 421).
+    /// Cancellation drops both borrowed halves; the caller retires the transport.
+    pub async fn pipeline<F>(
+        &mut self,
+        commands: &[(&[u8], Option<&[u8]>)],
+        mut response: F,
+    ) -> Result<usize, Error>
+    where
+        F: FnMut(Response, Vec<u8>) -> bool,
+    {
+        let (read, mut write) = (&mut self.stream).split();
+        let mut read = BufReader::with_capacity(1, read);
+        let writer = async {
+            for (line, payload) in commands {
+                write.write_all(line).await.map_err(error::network)?;
+                if let Some(payload) = payload {
+                    write.write_all(payload).await.map_err(error::network)?;
+                }
+                write.flush().await.map_err(error::network)?;
+            }
+            Ok::<(), Error>(())
+        };
+        let reader = async {
+            for index in 0..commands.len() {
+                let (reply, raw) = Self::read_reply(&mut read).await?;
+                if !response(reply, raw) {
+                    return Ok::<_, Error>((index + 1, true));
+                }
+            }
+            Ok((commands.len(), false))
+        };
+        futures_util::pin_mut!(writer, reader);
+        match futures_util::future::select(writer, reader).await {
+            futures_util::future::Either::Left((written, reading)) => {
+                written?;
+                reading.await.map(|(count, _)| count)
+            }
+            futures_util::future::Either::Right((replies, writing)) => {
+                let (count, stopped) = replies?;
+                if !stopped {
+                    writing.await?;
+                }
+                Ok(count)
             }
         }
     }
