@@ -1,18 +1,88 @@
-# Runtime supplied transport patch
+# Boundless patches
 
 Base: lettre v0.11.23, eb6136a06f1aba9432f73ef8f02a06aa0afc8f9c.
 
-- Adopt and recover an existing Tokio stream without implicit greeting, authentication, TLS, retry or QUIT. The caller owns destination authorization and transport security.
-- Separate bounded reply reading from writing for explicit pipelines and BDAT. Negative SMTP replies remain response facts; the upstream parser remains authoritative.
-- Stream DATA through the upstream dot-stuffing codec with cross-chunk CRLF, line, byte and transfer-mode validation. The exact terminator does not add a blank message line.
-- Avoid read-ahead across STARTTLS handoff. Reply limits apply before allocating an unbounded line; malformed input is not copied into errors.
-- Authentication/body writes are never included in tracing. Transient reply buffers are zeroed. Ordinary upstream high-level clients retain their existing success/error API.
-- Accept a final reply code without optional text. Gate upstream TLS-only tests on their required features.
+Boundless drives SMTP itself over a transport it supplies: it owns the socket,
+TLS, SASL, deadlines and every command, and uses lettre's codec, reply parser
+and connection for the wire. Ordinary upstream high-level clients keep their
+API and behavior. Fork tests run with
+`cargo test --no-default-features --features smtp-transport,tokio1 --lib --tests`
+(the feature set Boundless uses; upstream doctests need a TLS backend). Boundless
+tests live under its `protocols::smtp` module.
 
-Validation: 32 library tests and 5 supplied-transport integration tests pass with `--no-default-features --features smtp-transport,tokio1`; IMAPipe SMTP tests cover partial recipient rejection, explicit STARTTLS, frozen authentication failure, DATA streaming, BDAT and ordered pipeline results.
+## Kept patches
 
-Follow-up: DATA and text BDAT share one incremental body validator; BDAT validation never adds dot transparency or assumes chunk boundaries are line boundaries.
+### Supplied transport and its handoff
 
-## Optional stream ceiling (2026-09-14)
+`AsyncSmtpConnection::from_transport` adopts a caller's Tokio stream without
+greeting, EHLO, authentication, TLS, retry or QUIT, and `into_transport` returns
+it after STARTTLS, refusing while buffered plaintext remains. The connection
+reads through a one-byte buffer, so it never reads ahead across that handoff.
+Fork test: `rejected_reply_is_data_and_handoff_preserves_next_bytes`. Boundless:
+`independent_tls_mtls_and_starttls_verify_identity_trust_hostname_and_data`,
+`required_starttls_is_not_downgraded_when_the_extension_is_missing`.
 
-`BodyValidator::new` and `DataEncoder::new` accept `Option<usize>`: `None` imposes no cumulative product byte ceiling. Checked counters, line limits, CRLF/NUL/transfer-mode validation and terminal failures are unchanged. The complete-body helper passes its actual body bound. Validation: library and supplied_transport tests, including optional and explicit stream bounds.
+### Bounded reply reading
+
+`read_response_fact` reads one reply and returns a negative reply as a
+`Response`, not an error. Each line and the whole reply are bounded before they
+are buffered, the line must end in CRLF, malformed input is not copied into the
+error, and the read buffer is zeroed. Upstream `read_response` reads through the
+same path. `Response::into_parts` hands over code and lines without copying
+reply text. A final reply may omit its text (`250\r\n`). Fork tests:
+`malformed_and_oversized_replies_fail_without_echoing_input`,
+`final_reply_may_omit_text`.
+
+### Explicit writes and pipelining
+
+`write_bytes` writes an already validated command, BDAT chunk or SASL response
+without reading a reply. `pipeline` writes a group of commands while reading
+their replies in order, gives each reply to the caller as it arrives, including
+those before an I/O error, and stops writing when the caller says so (after a
+421). Boundless: `pipeline_preserves_order_when_the_server_waits_for_the_complete_group`,
+`failed_pipeline_keeps_received_replies_available_without_replay`,
+`pipeline_drains_early_replies_while_large_bdat_is_backpressured`,
+`independent_exim_pipelining_chunking_dsn_and_partial_recipients`.
+
+### DATA through the upstream codec
+
+`write_data` sends a body read from the caller's reader, up to a byte bound,
+through a private `DataEncoder`: upstream's dot-stuffing codec plus the body
+validator below, so CRLF split across reads is handled and the terminator adds
+no blank line. Boundless passes a body it already holds.
+Invalid input retires the connection; nothing is normalized, reset or resent.
+Fork unit tests: `data_encoder_handles_crlf_split_and_terminal_errors`,
+`data_encoder_optional_bound_keeps_validation`. Boundless:
+`partial_recipient_rejection_preserves_replies_and_data_is_dot_stuffed`,
+`smtp_input_rejects_command_smuggling_and_data_normalization`.
+
+### Shared body validation
+
+`BodyValidator` checks CRLF framing, NUL, 8-bit use against the envelope, 1000
+byte lines and an optional cumulative byte bound, incrementally and without
+retaining the body. It is `Copy` so a caller can check a body's end without
+giving up its state. Boundless validates text BDAT with it, with no dot
+transparency and no assumption that chunk boundaries are line boundaries.
+Fork test: `chunked_text_validation_has_no_dot_transparency_or_chunk_boundary_assumptions`.
+Boundless: `text_bdat_uses_shared_validation_without_dot_stuffing`.
+
+### No written bytes in tracing
+
+With the `tracing` feature, upstream logs every written line, AUTH responses and
+message bodies included. The connection logs the length of a write instead.
+Boundless builds without `tracing`, but `write_bytes` exists for SASL
+responses and `write_data` for bodies, so the redaction is what makes those
+APIs safe for any build that enables it. Evidence:
+`cargo check --no-default-features --features smtp-transport,tokio1,tracing`.
+
+### Tests in Boundless's feature set
+
+Upstream's transport tests need a TLS backend; they are gated on one, so the
+library tests build and run without TLS.
+
+## History
+
+2026-09-14: `BodyValidator::new` takes `Option<usize>`; `None` imposes no
+cumulative byte bound, other checks unchanged.
+2026-10-10: replies are returned without the raw bytes they were read from,
+and `DataEncoder` became private to `write_data`.
