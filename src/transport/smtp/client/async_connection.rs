@@ -98,14 +98,14 @@ impl AsyncSmtpConnection {
     }
 
     /// Read one bounded reply without converting remote rejection into an error.
-    /// Returns the exact reply bytes alongside the library's parsed response.
-    /// The caller must keep authentication responses on its private path.
-    pub async fn read_response_fact(&mut self) -> Result<(Response, Vec<u8>), Error> {
+    /// The bytes it was read from are zeroed; the caller must keep
+    /// authentication responses on its private path.
+    pub async fn read_response_fact(&mut self) -> Result<Response, Error> {
         Self::read_reply(&mut self.stream).await
     }
     async fn read_reply<R: futures_io::AsyncBufRead + Unpin>(
         reader: &mut R,
-    ) -> Result<(Response, Vec<u8>), Error> {
+    ) -> Result<Response, Error> {
         let mut buffer = zeroize::Zeroizing::new(Vec::with_capacity(512));
         loop {
             let start = buffer.len();
@@ -129,9 +129,7 @@ impl AsyncSmtpConnection {
             let text = std::str::from_utf8(&buffer)
                 .map_err(|_| error::response("SMTP response is not UTF-8"))?;
             match parse_response(text) {
-                Ok((remaining, response)) if remaining.is_empty() => {
-                    return Ok((response, std::mem::take(&mut *buffer)));
-                }
+                Ok((remaining, response)) if remaining.is_empty() => return Ok(response),
                 Err(nom::Err::Incomplete(_)) => {}
                 _ => return Err(error::response("Invalid SMTP response")),
             }
@@ -148,7 +146,7 @@ impl AsyncSmtpConnection {
         mut response: F,
     ) -> Result<usize, Error>
     where
-        F: FnMut(Response, Vec<u8>) -> bool,
+        F: FnMut(Response) -> bool,
     {
         let (read, mut write) = (&mut self.stream).split();
         let mut read = BufReader::with_capacity(1, read);
@@ -164,8 +162,7 @@ impl AsyncSmtpConnection {
         };
         let reader = async {
             for index in 0..commands.len() {
-                let (reply, raw) = Self::read_reply(&mut read).await?;
-                if !response(reply, raw) {
+                if !response(Self::read_reply(&mut read).await?) {
                     return Ok::<_, Error>((index + 1, true));
                 }
             }
@@ -496,7 +493,7 @@ impl AsyncSmtpConnection {
 
     /// Gets the SMTP response
     pub async fn read_response(&mut self) -> Result<Response, Error> {
-        let (response, _) = self.read_response_fact().await?;
+        let response = self.read_response_fact().await?;
         if response.is_positive() {
             Ok(response)
         } else {

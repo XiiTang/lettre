@@ -174,27 +174,23 @@ impl BodyValidator {
         }
         Ok(())
     }
-    /// Number of unencoded body bytes consumed.
-    pub fn bytes(&self) -> usize {
-        self.total
-    }
 }
 
-/// Incremental DATA transparency using the existing SMTP codec.
-pub struct DataEncoder {
+/// Incremental DATA transparency using the existing SMTP codec, for `write_data`.
+struct DataEncoder {
     codec: ClientCodec,
     validator: BodyValidator,
 }
 impl DataEncoder {
     /// Create a DATA encoder with an optional cumulative byte bound for the negotiated envelope mode.
-    pub fn new(maximum: Option<usize>, allow_eight_bit: bool) -> Self {
+    fn new(maximum: Option<usize>, allow_eight_bit: bool) -> Self {
         Self {
             codec: ClientCodec::new(),
             validator: BodyValidator::new(maximum, allow_eight_bit),
         }
     }
     /// Validate and encode one chunk; no body is retained.
-    pub fn encode(&mut self, bytes: &[u8]) -> Result<Vec<u8>, crate::transport::smtp::Error> {
+    fn encode(&mut self, bytes: &[u8]) -> Result<Vec<u8>, crate::transport::smtp::Error> {
         self.validator.validate(bytes)?;
         let mut output = Vec::with_capacity(bytes.len().checked_mul(2).ok_or_else(|| {
             crate::transport::smtp::error::client("SMTP DATA chunk is too large")
@@ -203,13 +199,9 @@ impl DataEncoder {
         Ok(output)
     }
     /// Finish the message and return its exact protocol terminator.
-    pub fn finish(self) -> Result<&'static [u8], crate::transport::smtp::Error> {
+    fn finish(self) -> Result<&'static [u8], crate::transport::smtp::Error> {
         self.validator.finish()?;
         Ok(b".\r\n")
-    }
-    /// Count unencoded body bytes.
-    pub fn bytes(&self) -> usize {
-        self.validator.bytes()
     }
 }
 
@@ -248,6 +240,39 @@ mod test {
             String::from_utf8(buf).unwrap(),
             "..\r\ntest\r\ntest\r\n\r\n..\r\n\r\ntestte\r\n..\r\nsttesttest.test\n.test\ntesttesttest\r\n..test\r\ntest.\r\n"
         );
+    }
+
+    #[test]
+    fn data_encoder_handles_crlf_split_and_terminal_errors() {
+        let mut encoder = DataEncoder::new(Some(100), false);
+        let mut out = encoder.encode(b".a\r").unwrap();
+        out.extend(encoder.encode(b"\n.").unwrap());
+        out.extend(encoder.encode(b"b\r\n").unwrap());
+        out.extend(encoder.finish().unwrap());
+        assert_eq!(out, b"..a\r\n..b\r\n.\r\n");
+        let mut encoder = DataEncoder::new(Some(3), false);
+        assert!(encoder.encode(b"1234").is_err());
+        assert!(encoder.encode(b"\r\n").is_err());
+        assert!(encoder.finish().is_err());
+        let mut encoder = DataEncoder::new(Some(100), false);
+        assert!(encoder.encode(b"bad\n").is_err());
+        let mut encoder = DataEncoder::new(Some(100), false);
+        assert!(encoder.encode(&[0xff]).is_err());
+    }
+
+    #[test]
+    fn data_encoder_optional_bound_keeps_validation() {
+        let mut encoder = DataEncoder::new(None, false);
+        for _ in 0..10000 {
+            encoder.encode(b"body\r\n").unwrap();
+        }
+        assert_eq!(encoder.finish().unwrap(), b".\r\n");
+        assert!(
+            DataEncoder::new(Some(5), false)
+                .encode(b"body\r\n")
+                .is_err()
+        );
+        assert!(DataEncoder::new(None, false).encode(b"body\n").is_err());
     }
 
     #[test]
