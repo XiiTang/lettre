@@ -86,3 +86,12 @@ library tests build and run without TLS.
 cumulative byte bound, other checks unchanged.
 2026-10-10: replies are returned without the raw bytes they were read from,
 and `DataEncoder` became private to `write_data`.
+
+## Fixed locked certificate verification (#312)
+
+Update rustls-webpki 0.103.13 to 0.103.16 and webpki-root-certs 1.0.9 to
+1.0.10 for RUSTSEC-2026-0382 and RUSTSEC-2026-0383. webpki now requires
+aws-lc-rs 1.18; retain the minimum 1.18.0, aws-lc-sys 0.44.0 and optional
+aws-lc-fips-sys 0.14.0. No SMTP, transport or public API code changes.
+Regression coverage: the builder/SMTP/Tokio/ring/platform-verifier suite and
+Boundless's complete SMTP library tests.
