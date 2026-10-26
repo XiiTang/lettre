@@ -111,7 +111,11 @@ impl AsyncSmtpConnection {
             let start = buffer.len();
             let limit = MAX_RESPONSE_LINE_BYTES.min(MAX_RESPONSE_BYTES.saturating_sub(start));
             if limit == 0 {
-                return Err(error::response("SMTP response exceeds its limit"));
+                return Err(error::unparsed(
+                    buffer,
+                    false,
+                    "SMTP response exceeds its limit",
+                ));
             }
             let count = (&mut *reader)
                 .take((limit + 1) as u64)
@@ -119,19 +123,22 @@ impl AsyncSmtpConnection {
                 .await
                 .map_err(error::network)?;
             if count == 0 {
-                return Err(error::response("Incomplete SMTP response"));
+                return Err(error::unparsed(buffer, true, "Incomplete SMTP response"));
             }
             if count > limit || !buffer[start..].ends_with(b"\r\n") {
-                return Err(error::response(
+                return Err(error::unparsed(
+                    buffer,
+                    count <= limit,
                     "SMTP response exceeds limits or lacks CRLF",
                 ));
             }
-            let text = std::str::from_utf8(&buffer)
-                .map_err(|_| error::response("SMTP response is not UTF-8"))?;
+            let Ok(text) = std::str::from_utf8(&buffer) else {
+                return Err(error::unparsed(buffer, true, "SMTP response is not UTF-8"));
+            };
             match parse_response(text) {
                 Ok((remaining, response)) if remaining.is_empty() => return Ok(response),
                 Err(nom::Err::Incomplete(_)) => {}
-                _ => return Err(error::response("Invalid SMTP response")),
+                _ => return Err(error::unparsed(buffer, true, "Invalid SMTP response")),
             }
         }
     }
@@ -533,5 +540,81 @@ impl AsyncSmtpConnection {
     #[cfg_attr(docsrs, doc(cfg(any(feature = "rustls", feature = "boring-tls"))))]
     pub fn certificate_chain(&self) -> Result<Vec<Vec<u8>>, Error> {
         self.stream.get_ref().certificate_chain()
+    }
+}
+
+#[cfg(test)]
+mod failure_tests {
+    use super::*;
+    use tokio1_crate as tokio;
+    #[tokio::test]
+    async fn an_unread_reply_hands_its_bytes_to_the_caller() {
+        let total = [b"250-".as_slice(), &vec![b'a'; 994], b"\r\n"]
+            .concat()
+            .repeat(100);
+        let long = [b"250 ".as_slice(), &vec![b'a'; 1100], b"\r\n"].concat();
+        let cases = [
+            (
+                [total.as_slice(), b"250 more\r\n"].concat(),
+                total,
+                false,
+                "SMTP response exceeds its limit",
+            ),
+            (
+                b"250-first\r\n".to_vec(),
+                b"250-first\r\n".to_vec(),
+                true,
+                "Incomplete SMTP response",
+            ),
+            (vec![], vec![], true, "Incomplete SMTP response"),
+            (
+                long.clone(),
+                long[..1001].to_vec(),
+                false,
+                "SMTP response exceeds limits or lacks CRLF",
+            ),
+            (
+                b"250 ok\n".to_vec(),
+                b"250 ok\n".to_vec(),
+                true,
+                "SMTP response exceeds limits or lacks CRLF",
+            ),
+            (
+                b"220-ok\r\n33".to_vec(),
+                b"220-ok\r\n33".to_vec(),
+                true,
+                "SMTP response exceeds limits or lacks CRLF",
+            ),
+            (
+                b"250 caf\xff\r\n".to_vec(),
+                b"250 caf\xff\r\n".to_vec(),
+                true,
+                "SMTP response is not UTF-8",
+            ),
+            (
+                b"250-banner\r\n334 c2VjcmV0\r\n".to_vec(),
+                b"250-banner\r\n334 c2VjcmV0\r\n".to_vec(),
+                true,
+                "Invalid SMTP response",
+            ),
+        ];
+        for (input, bytes, complete, reason) in cases {
+            let mut reader = BufReader::with_capacity(1, futures_util::io::Cursor::new(input));
+            let error = AsyncSmtpConnection::read_reply(&mut reader)
+                .await
+                .unwrap_err();
+            let unread = error.unparsed_response().unwrap();
+            assert_eq!(unread.bytes(), bytes);
+            assert_eq!(unread.complete(), complete);
+            assert_eq!(unread.to_string(), reason);
+            assert_eq!(error.to_string(), format!("response error: {reason}"));
+            assert_eq!(
+                format!("{unread:?}"),
+                format!(
+                    "UnparsedResponse {{ reason: {reason:?}, len: {} }}",
+                    bytes.len()
+                )
+            );
+        }
     }
 }

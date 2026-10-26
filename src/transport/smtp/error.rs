@@ -9,6 +9,53 @@ use crate::{
 
 // Inspired by https://github.com/seanmonstar/reqwest/blob/a8566383168c0ef06c21f38cbc9213af6ff6db31/src/error.rs
 
+/// Bytes of one reply the parser could not read, zeroized when dropped.
+/// Display and Debug never expose the bytes.
+pub struct UnparsedResponse {
+    bytes: zeroize::Zeroizing<Vec<u8>>,
+    complete: bool,
+    reason: &'static str,
+}
+impl UnparsedResponse {
+    /// The bytes read for the failing reply.
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+    /// Whether the reply was read without truncation at a framing limit.
+    pub fn complete(&self) -> bool {
+        self.complete
+    }
+}
+impl fmt::Display for UnparsedResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.reason)
+    }
+}
+impl fmt::Debug for UnparsedResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("UnparsedResponse")
+            .field("reason", &self.reason)
+            .field("len", &self.bytes.len())
+            .finish()
+    }
+}
+impl StdError for UnparsedResponse {}
+
+pub(crate) fn unparsed(
+    bytes: zeroize::Zeroizing<Vec<u8>>,
+    complete: bool,
+    reason: &'static str,
+) -> Error {
+    Error::new(
+        Kind::Response,
+        Some(UnparsedResponse {
+            bytes,
+            complete,
+            reason,
+        }),
+    )
+}
+
 /// The Errors that may occur when sending an email over SMTP
 pub struct Error {
     inner: Box<Inner>,
@@ -35,6 +82,14 @@ impl Error {
     /// Returns true if the error is from response
     pub fn is_response(&self) -> bool {
         matches!(self.inner.kind, Kind::Response)
+    }
+
+    /// The bytes of a reply that could not be parsed, if this response error owns them.
+    pub fn unparsed_response(&self) -> Option<&UnparsedResponse> {
+        if !self.is_response() {
+            return None;
+        }
+        self.inner.source.as_ref()?.downcast_ref()
     }
 
     /// Returns true if the error is from client

@@ -26,12 +26,13 @@ Fork test: `rejected_reply_is_data_and_handoff_preserves_next_bytes`. Boundless:
 
 `read_response_fact` reads one reply and returns a negative reply as a
 `Response`, not an error. Each line and the whole reply are bounded before they
-are buffered, the line must end in CRLF, malformed input is not copied into the
-error, and the read buffer is zeroed. Upstream `read_response` reads through the
+are buffered, and the line must end in CRLF. Malformed input is not copied into
+the error's text; the bytes read for the failing reply move into its
+`UnparsedResponse`, zeroed on drop, for the caller to keep or drop. Upstream `read_response` reads through the
 same path. `Response::into_parts` hands over code and lines without copying
 reply text. A final reply may omit its text (`250\r\n`). Fork tests:
 `malformed_and_oversized_replies_fail_without_echoing_input`,
-`final_reply_may_omit_text`.
+`final_reply_may_omit_text`, `an_unread_reply_hands_its_bytes_to_the_caller`.
 
 ### Explicit writes and pipelining
 
@@ -95,3 +96,13 @@ aws-lc-rs 1.18; retain the minimum 1.18.0, aws-lc-sys 0.44.0 and optional
 aws-lc-fips-sys 0.14.0. No SMTP, transport or public API code changes.
 Regression coverage: the builder/SMTP/Tokio/ring/platform-verifier suite and
 Boundless's complete SMTP library tests.
+
+## W5-D10: unreadable reply facts
+
+Boundless needs the exact bytes of an unreadable public reply without copying
+mechanism input into error text. The bounded reader moves its existing zeroized
+buffer into UnparsedResponse, with completeness fixed at the deciding exit.
+Display exposes only the static reason; Debug exposes reason and length.
+Regression evidence: an_unread_reply_hands_its_bytes_to_the_caller covers every
+reader exit, truncation and exact bytes. The supplied-transport handoff and
+malformed-input regression tests remain in the required feature-set suite.

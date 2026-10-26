@@ -196,7 +196,7 @@ pub use self::async_transport::{AsyncSmtpTransport, AsyncSmtpTransportBuilder};
 #[cfg(feature = "pool")]
 pub use self::pool::PoolConfig;
 pub use self::{
-    error::Error,
+    error::{Error, UnparsedResponse},
     transport::{SmtpTransport, SmtpTransportBuilder},
 };
 #[cfg(any(feature = "native-tls", feature = "rustls", feature = "boring-tls"))]
